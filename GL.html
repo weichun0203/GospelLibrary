@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Smart App Link</title>
+  <meta name="description" content="Auto-detect iOS/Android and open the right app link with graceful fallback." />
+  <style>
+    :root { --fg:#0f172a; --muted:#475569; --bg:#f8fafc; --card:#ffffff; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; color:var(--fg); background:linear-gradient(180deg, var(--bg), #eef2ff); }
+    .wrap { min-height:100dvh; display:grid; place-items:center; padding:24px; }
+    .card { width:min(780px, 100%); background:var(--card); border-radius:20px; padding:28px; box-shadow:0 10px 30px rgba(2,6,23,.08); }
+    h1 { font-size:clamp(22px, 3vw, 28px); margin:0 0 8px; }
+    p { color:var(--muted); margin:0 0 16px; line-height:1.7; }
+    .btns { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
+    a.btn { text-decoration:none; display:inline-block; padding:12px 16px; border-radius:12px; border:1px solid #e2e8f0; background:#fff; }
+    a.btn:hover { border-color:#cbd5e1; }
+    code { background:#f1f5f9; padding:.2em .4em; border-radius:6px; }
+    .small { font-size:12px; color:#64748b; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>正在為你開啟 App…</h1>
+      <p>若數秒內沒有自動跳轉，請手動點擊下方按鈕。</p>
+      <div class="btns">
+        <a id="iosStore" class="btn" href="#">到 iOS App Store</a>
+        <a id="androidStore" class="btn" href="#">到 Google Play</a>
+        <a id="webFallback" class="btn" href="#">改用網頁版本</a>
+      </div>
+      <p class="small">此頁會依據你的裝置自動開啟 App（若未安裝則帶你到商店）。</p>
+      <p class="small">開發者：可編輯本文檔上方的 <code>CONFIG</code> 常數以設定連結與深連結。</p>
+    </div>
+  </div>
+
+  <script>
+    // === CONFIG: 依專案調整 ===
+    const CONFIG = {
+      // 1) 商店頁面（若未安裝 App 的 fallback）
+      IOS_APP_STORE_URL: "https://apps.apple.com/tw/app/%E7%A6%8F%E9%9F%B3%E5%9C%96%E6%9B%B8%E9%A4%A8/id598329798", // 替換你的 App Store 連結（idXXXXXXXXXX）
+      ANDROID_PLAY_URL: "https://play.google.com/store/apps/details?id=org.lds.ldssa&hl=zh_TW&pli=1", // 替換你的 Google Play 連結（package）
+
+      // 2) 深連結（已安裝 App 時直達 App）
+      // 例：自家 scheme、或 LINE/其他 App 的 deeplink。可把目前網址參數一併傳遞給 App。
+      IOS_APP_SCHEME: "myapp://open",           // e.g. myapp://open?ref=smartlink
+      ANDROID_APP_SCHEME: "myapp://open",       // Android 多數情況也吃相同 scheme
+
+      // 3) 網頁版後備（桌面瀏覽器或無法開啟時）
+      WEB_FALLBACK_URL: "https://example.com/landing", // 可替換為你的 H5/官網/註冊頁
+
+      // 4) 啟動逾時（毫秒）：嘗試開 App 失敗後，改導至商店
+      OPEN_TIMEOUT_MS: 1500
+    };
+
+    // === UA 裝置偵測（涵蓋 iPadOS 13+ 將 iPad 報為 Mac 的情形）===
+    const ua = navigator.userAgent || navigator.vendor || window.opera;
+    const isAndroid = /Android/i.test(ua);
+    const isIOSClassic = /iPhone|iPad|iPod/i.test(ua);
+    const isIpadOS13Plus = (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const isIOS = isIOSClassic || isIpadOS13Plus;
+
+    // 保留目前網址參數與片段，轉交給 app 或網頁
+    const passThrough = (function(){
+      const q = window.location.search || "";
+      const h = window.location.hash || "";
+      return (q + h);
+    })();
+
+    // 依平台組合最終 deeplink 與商店連結
+    const iosDeeplink = addParams(CONFIG.IOS_APP_SCHEME, passThrough);
+    const androidDeeplink = addParams(CONFIG.ANDROID_APP_SCHEME, passThrough);
+
+    // 設定頁面可見之手動按鈕
+    document.getElementById('iosStore').href = CONFIG.IOS_APP_STORE_URL;
+    document.getElementById('androidStore').href = CONFIG.ANDROID_PLAY_URL;
+    document.getElementById('webFallback').href = CONFIG.WEB_FALLBACK_URL;
+
+    // 進站即嘗試開啟 App → 失敗則導向商店 → 再失敗給 H5
+    (function smartOpen(){
+      if (isIOS) {
+        tryOpen(iosDeeplink, CONFIG.IOS_APP_STORE_URL);
+      } else if (isAndroid) {
+        // Android 亦可考慮使用 intent:// 方案（見下方註解）
+        tryOpen(androidDeeplink, CONFIG.ANDROID_PLAY_URL);
+      } else {
+        // 桌面或不明平台：直接去 H5
+        safeNavigate(CONFIG.WEB_FALLBACK_URL);
+      }
+    })();
+
+    // === 工具函式 ===
+    function addParams(url, suffix){
+      if (!suffix) return url;
+      // 若已有 ? 就直接串接；否則補上 ?
+      const hasQuery = url.includes('?');
+      if (suffix.startsWith('?') || suffix.startsWith('#')) {
+        return url + suffix; // 原樣相接（包含 hash）
+      }
+      return url + (hasQuery ? '&' : '?') + suffix.replace(/^\?/, '');
+    }
+
+    function tryOpen(deeplink, storeUrl){
+      // iOS/Android 主流做法：先嘗試開啟 scheme，逾時跳商店
+      const start = Date.now();
+      let didHide = false;
+
+      const timer = setTimeout(function(){
+        if (Date.now() - start < CONFIG.OPEN_TIMEOUT_MS + 200) {
+          safeNavigate(storeUrl);
+        }
+      }, CONFIG.OPEN_TIMEOUT_MS);
+
+      // 對大部分瀏覽器，直接設置 location.href 即可觸發
+      window.location.href = deeplink;
+
+      // 一些瀏覽器（舊版）可用隱形 iframe 嘗試
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = deeplink;
+      iframe.onload = iframe.onerror = function(){
+        if (!didHide) {
+          clearTimeout(timer);
+          didHide = true;
+        }
+      };
+      document.body.appendChild(iframe);
+
+      // 補強：頁面可見性改變（代表成功跳走至 App 或離開頁面）
+      document.addEventListener('visibilitychange', function onVis(){
+        if (document.hidden) {
+          clearTimeout(timer);
+          document.removeEventListener('visibilitychange', onVis);
+        }
+      });
+    }
+
+    function safeNavigate(url){
+      try { window.location.replace(url); }
+      catch(_) { window.location.href = url; }
+    }
+
+    /*
+    ▼ 進階：Android intent:// 寫法（可帶 package 與 fallback）
+      const intentUrl = `intent://open${encodeURI(passThrough)}#Intent;scheme=myapp;package=com.example.app;S.browser_fallback_url=${encodeURIComponent(CONFIG.ANDROID_PLAY_URL)};end`;
+      // 然後：safeNavigate(intentUrl)
+    */
+  </script>
+</body>
+</html>
